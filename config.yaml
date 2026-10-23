@@ -1,0 +1,59 @@
+# Debt Agent settings. Edit this file, then restart the agent.
+#
+# mode: demo  -> fake accounts, nothing to connect. Start here.
+# mode: plaid -> real (or Plaid Sandbox) bank data. Needs Plaid keys in .env.
+mode: demo
+
+settings:
+  buffer: 1000              # checking never drops below this
+  strategy: avalanche       # avalanche (highest APR first) or snowball (smallest balance first)
+  carry_threshold: 50       # extra under this amount carries to next payday
+  promo_window_days: 90     # a 0% promo ending within this many days gets paid first
+  reminder_days: 3          # remind you this many days before a due date
+  check_interval_minutes: 15
+  timezone: America/New_York
+  # checking_account: "Plaid Checking"   # which checking account your pay lands in (part of its name)
+
+# How you get paid. Pick one schedule.
+income:
+  schedule: biweekly        # weekly | biweekly | semimonthly | monthly | variable
+  anchor_date: 2026-10-23   # any recent payday (weekly/biweekly)
+  # days: [1, 15]           # semimonthly
+  # day: 1                  # monthly
+  # horizon_days: 30        # variable / owner draws: plan bills over this many days
+  rules:                    # a deposit counts as pay if its description contains `match`
+    - match: "PAYROLL"      #   and it's at least `min_amount`
+      min_amount: 1000
+    # - match: "SHUMAKER"   # e.g. owner draws from the business account
+    #   min_amount: 2000
+
+# Recurring bills paid from checking (not your cards). These are reserved first.
+bills:
+  - { name: Mortgage, amount: 1850, due_day: 1 }
+  - { name: Utilities, amount: 260, due_day: 18 }
+  - { name: Car insurance, amount: 185, due_day: 9 }
+  - { name: Phone and internet, amount: 210, due_day: 24 }
+
+# Per-account settings for connected accounts. `match` = part of the account's
+# name (or its last 4 digits). Pay links open the card's payment page.
+accounts:
+  - match: "Plaid Credit Card"          # Sandbox card; replace with your real ones
+    nickname: "Sandbox Card"
+    pay_url: "https://www.chase.com"
+  # - match: "Sapphire"
+  #   pay_url: "https://www.chase.com"
+  #   promo_end: 2027-03-01            # 0% period ends
+  #   deferred_interest: false
+  # - match: "Business"
+  #   exclude: true                    # keep business cards out of the personal plan
+
+# Accounts Plaid can't see. Enter once; the agent estimates the balance each
+# month (balance + interest - payment). Update `balance` from a statement now and then.
+manual_accounts:
+  - name: "Credit Union Auto Loan"
+    type: loan
+    balance: 14200
+    apr: 6.9
+    min_payment: 385
+    due_day: 12
+    pay_url: "https://www.example-credit-union.org"
