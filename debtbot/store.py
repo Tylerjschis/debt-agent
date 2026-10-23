@@ -139,6 +139,10 @@ class Store:
             cols = ", ".join(a)
             self._x(f"INSERT INTO accounts({cols}) VALUES ({','.join('?' * len(a))})", tuple(a.values()))
 
+    def delete_account(self, account_id: str):
+        self._x("DELETE FROM accounts WHERE id=?", (account_id,))
+        self.audit("account_removed", {"id": account_id})
+
     def update_account(self, account_id: str, **fields):
         cols = ", ".join(f"{k}=?" for k in fields)
         self._x(f"UPDATE accounts SET {cols} WHERE id=?", (*fields.values(), account_id))

@@ -244,7 +244,7 @@ class Bot:
             return await update.message.reply_text(
                 "Bank linking needs mode: plaid in config.yaml and Plaid keys in your settings.")
         url = f"{self.cfg.public_url}/link?t={self.web.new_token()}"
-        note = "\nSandbox login: user_good / pass_good" if self.cfg.plaid_env == "sandbox" else ""
+        note = "\nSandbox login: user_transactions_dynamic / pass_good" if self.cfg.plaid_env == "sandbox" else ""
         await update.message.reply_text(
             "Tap to connect a bank. This link works for 15 minutes and only for you." + note,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Connect a bank ↗", url=url)]]))

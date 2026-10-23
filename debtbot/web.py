@@ -120,7 +120,7 @@ class LinkServer:
                 # /oauth is Plaid returning from a bank's own login page; the page
                 # carries its token in session storage, and every API call is checked.
                 if (path == "/link" and outer.valid(self._token())) or path == "/oauth":
-                    note = ("Sandbox: log in with username user_good and password pass_good."
+                    note = ("Sandbox: log in with username user_transactions_dynamic and password pass_good."
                             if outer.svc.cfg.plaid_env == "sandbox" else "")
                     return self._send(200, PAGE.replace("__SANDBOX__", note).encode(), "text/html; charset=utf-8")
                 self._send(404, b"not found", "text/plain")

@@ -105,6 +105,10 @@ def apply_account_rules(store: Store, cfg: Config):
 def sync_manual_accounts(store: Store, cfg: Config, today: date):
     """Accounts Plaid can't see. Balance is entered once, then estimated monthly
     (balance + interest - payment) until you update it."""
+    wanted = {"manual:" + m["name"].lower().replace(" ", "-") for m in cfg.manual_accounts}
+    for a in store.accounts():  # removed from config.yaml -> removed here too
+        if a["id"].startswith("manual:") and a["id"] not in wanted:
+            store.delete_account(a["id"])
     for m in cfg.manual_accounts:
         acct_id = "manual:" + m["name"].lower().replace(" ", "-")
         existing = {a["id"]: a for a in store.accounts()}.get(acct_id)
