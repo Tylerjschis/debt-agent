@@ -2,7 +2,7 @@
 #
 # mode: demo  -> fake accounts, nothing to connect. Start here.
 # mode: plaid -> real (or Plaid Sandbox) bank data. Needs Plaid keys in .env.
-mode: demo
+mode: plaid
 
 settings:
   buffer: 1000              # checking never drops below this
