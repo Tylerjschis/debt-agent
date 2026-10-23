@@ -12,14 +12,11 @@ settings:
   reminder_days: 3          # remind you this many days before a due date
   check_interval_minutes: 15
   timezone: America/New_York
-  # checking_account: "Plaid Checking"   # which checking account your pay lands in (part of its name)
+  checking_account: "Plaid Checking"   # which checking account your pay lands in (part of its name)
 
 # How you get paid. "auto" learns it from your deposits (recommended).
 income:
   schedule: auto            # auto | weekly | biweekly | semimonthly | monthly | variable
-  # anchor_date: 2026-10-23 # any recent payday (weekly/biweekly)
-  # days: [1, 15]           # semimonthly
-  # day: 1                  # monthly
   horizon_days: 14          # until pay is detected, plan bills over this many days
   rules: []                 # optional extra rules, e.g. owner draws from the business account:
   # - match: "SHUMAKER"     #   a deposit whose description contains this...
@@ -36,20 +33,5 @@ accounts:
   - match: "Plaid Credit Card"          # Sandbox card; replace with your real ones
     nickname: "Sandbox Card"
     pay_url: "https://www.chase.com"
-  # - match: "Sapphire"
-  #   pay_url: "https://www.chase.com"
-  #   promo_end: 2027-03-01            # 0% period ends
-  #   deferred_interest: false
-  # - match: "Business"
-  #   exclude: true                    # keep business cards out of the personal plan
-
-# Accounts Plaid can't see. Enter once; the agent estimates the balance each
-# month (balance + interest - payment). Update `balance` from a statement now and then.
-manual_accounts:
-  - name: "Credit Union Auto Loan"
-    type: loan
-    balance: 14200
-    apr: 6.9
-    min_payment: 385
-    due_day: 12
-    pay_url: "https://www.example-credit-union.org"
+  - match: "Business"
+    exclude: true                       # keep
