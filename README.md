@@ -127,6 +127,9 @@ it. If one still won't connect, add it as a `manual_accounts` entry for now.
 | `/buffer 1500` | Change the safety buffer |
 | `/sync` | Pull fresh bank data now |
 | `/link` | Connect a bank from your phone |
+| `/bills` | Recurring bills from checking and your detected pay |
+| `/subs` | Subscriptions, monthly and yearly cost, keep or flag to cancel |
+| `/spending 30` | Spending by category vs your normal, repeat small purchases |
 
 **Adjust** on a plan lets you type extra amounts, e.g. `Discover 1500, Amex 200`.
 Minimums are always kept.
@@ -142,6 +145,28 @@ python -m debtbot.cli status
 python -m debtbot.cli plan --deposit 4200
 python -m debtbot.cli compare --extra 600
 ```
+
+## What it learns from your transactions
+
+Once your checking and cards are connected, Plaid spots everything that repeats:
+
+- **Pay:** your paycheck deposits, so it knows when the next one is due and
+  recognizes it when it lands (`income: schedule: auto` in `config.yaml`).
+- **Bills from checking:** mortgage, utilities, insurance, phone. These are set
+  aside before any card gets extra money. Credit-card autopays are recognized
+  and not counted twice.
+- **Subscriptions** on any account: cost per month and year, price increases,
+  overlapping services (three streaming apps), and a 🚩 flag-to-cancel list that
+  warns you if a flagged one charges again.
+- **Spending:** by category against your usual, plus small purchases that add up.
+  A recap arrives every Sunday at 6 PM.
+
+The first time it sees your accounts it sends one summary. After that it tells
+you about each new recurring charge or price increase once. Tap the buttons to
+correct anything, or say it in chat ("Verizon isn't a bill").
+
+When you chat about spending, Claude sees merchant names, amounts and dates for
+the period you ask about (never account numbers or bank logins).
 
 ## How the plan is built
 

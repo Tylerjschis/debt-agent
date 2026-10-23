@@ -16,9 +16,12 @@ from plaid.model.country_code import CountryCode
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
+from plaid.model.link_token_transactions import LinkTokenTransactions
 from plaid.model.liabilities_get_request import LiabilitiesGetRequest
 from plaid.model.products import Products
 from plaid.model.sandbox_public_token_create_request import SandboxPublicTokenCreateRequest
+from plaid.model.sandbox_public_token_create_request_options import SandboxPublicTokenCreateRequestOptions
+from plaid.model.transactions_recurring_get_request import TransactionsRecurringGetRequest
 from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
 from .store import Store
@@ -44,6 +47,9 @@ def link_sandbox_bank(api: plaid_api.PlaidApi, store: Store, institution_id: str
     pub = api.sandbox_public_token_create(SandboxPublicTokenCreateRequest(
         institution_id=institution_id,
         initial_products=[Products("transactions"), Products("liabilities")],
+        # Plaid's test user with realistic, recurring transaction history
+        options=SandboxPublicTokenCreateRequestOptions(override_username="user_transactions_dynamic",
+                                                       override_password="pass_good"),
     ))
     ex = api.item_public_token_exchange(ItemPublicTokenExchangeRequest(public_token=pub.public_token))
     store.add_institution(ex.item_id, "Sandbox: First Platypus Bank", ex.access_token)
@@ -58,6 +64,7 @@ def create_link_token(api: plaid_api.PlaidApi, user_id: str = "owner", redirect_
         products=[Products("transactions"), Products("liabilities")],
         country_codes=[CountryCode("US")],
         language="en",
+        transactions=LinkTokenTransactions(days_requested=365),  # a year of history for spending trends
     )
     if redirect_uri:  # needed for OAuth banks (Chase, Capital One...) on a phone
         kwargs["redirect_uri"] = redirect_uri
@@ -137,16 +144,45 @@ def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict):
         req = TransactionsSyncRequest(access_token=token, cursor=cursor) if cursor \
             else TransactionsSyncRequest(access_token=token)
         resp = api.transactions_sync(req).to_dict()
-        for t in resp["added"]:
+        for t in resp["added"] + (resp.get("modified") or []):
             # Plaid: positive amount = money out, negative = money in
+            pfc = t.get("personal_finance_category") or {}
             store.add_transaction(t["transaction_id"], t["account_id"], _s(t["date"]),
-                                  t.get("merchant_name") or t.get("name") or "", -float(t["amount"]))
+                                  t.get("name") or "", -float(t["amount"]),
+                                  merchant=t.get("merchant_name"), category=pfc.get("primary"),
+                                  detailed=pfc.get("detailed"), pending=bool(t.get("pending")))
         for t in resp.get("removed") or []:
             store.remove_transaction(t["transaction_id"])
         cursor = resp["next_cursor"]
         if not resp["has_more"]:
             break
     store.set_institution(inst["item_id"], cursor=cursor)
+    _sync_recurring(api, store, inst)
     if first_sync:
         # Don't fire payday alerts for months of old history.
         store.mark_all_processed()
+
+
+def _sync_recurring(api: plaid_api.PlaidApi, store: Store, inst: dict):
+    """Recurring charges and deposits Plaid has spotted (bills, subscriptions, pay)."""
+    try:
+        resp = api.transactions_recurring_get(
+            TransactionsRecurringGetRequest(access_token=inst["access_token"])).to_dict()
+    except plaid.ApiException as e:
+        # Normal right after linking (PRODUCT_NOT_READY); it fills in on a later sync.
+        log.info("Recurring not available yet for %s: %s", inst["name"], (getattr(e, "body", "") or "")[:160])
+        return
+    for direction, key in (("in", "inflow_streams"), ("out", "outflow_streams")):
+        for s in resp.get(key) or []:
+            pfc = s.get("personal_finance_category") or {}
+            store.upsert_stream({
+                "stream_id": s["stream_id"], "item_id": inst["item_id"], "account_id": s["account_id"],
+                "direction": direction, "name": s.get("description") or "",
+                "merchant": s.get("merchant_name"),
+                "frequency": str(s.get("frequency") or "UNKNOWN").lower(),
+                "avg_amount": abs(float((s.get("average_amount") or {}).get("amount") or 0)),
+                "last_amount": abs(float((s.get("last_amount") or {}).get("amount") or 0)),
+                "last_date": _s(s.get("last_date")), "next_date": _s(s.get("predicted_next_date")),
+                "category": pfc.get("primary"), "detailed": pfc.get("detailed"),
+                "status": str(s.get("status") or ""), "active": int(bool(s.get("is_active"))),
+            })

@@ -14,25 +14,21 @@ settings:
   timezone: America/New_York
   # checking_account: "Plaid Checking"   # which checking account your pay lands in (part of its name)
 
-# How you get paid. Pick one schedule.
+# How you get paid. "auto" learns it from your deposits (recommended).
 income:
-  schedule: biweekly        # weekly | biweekly | semimonthly | monthly | variable
-  anchor_date: 2026-10-23   # any recent payday (weekly/biweekly)
+  schedule: auto            # auto | weekly | biweekly | semimonthly | monthly | variable
+  # anchor_date: 2026-10-23 # any recent payday (weekly/biweekly)
   # days: [1, 15]           # semimonthly
   # day: 1                  # monthly
-  # horizon_days: 30        # variable / owner draws: plan bills over this many days
-  rules:                    # a deposit counts as pay if its description contains `match`
-    - match: "PAYROLL"      #   and it's at least `min_amount`
-      min_amount: 1000
-    # - match: "SHUMAKER"   # e.g. owner draws from the business account
-    #   min_amount: 2000
+  horizon_days: 14          # until pay is detected, plan bills over this many days
+  rules: []                 # optional extra rules, e.g. owner draws from the business account:
+  # - match: "SHUMAKER"     #   a deposit whose description contains this...
+  #   min_amount: 2000      #   ...and is at least this much counts as pay
 
-# Recurring bills paid from checking (not your cards). These are reserved first.
-bills:
-  - { name: Mortgage, amount: 1850, due_day: 1 }
-  - { name: Utilities, amount: 260, due_day: 18 }
-  - { name: Car insurance, amount: 185, due_day: 9 }
-  - { name: Phone and internet, amount: 210, due_day: 24 }
+# Bills paid from checking are detected from your transactions automatically
+# (send /bills to see them). Add any the bank can't see here, e.g. cash rent:
+bills: []
+  # - { name: Rent, amount: 1200, due_day: 1 }
 
 # Per-account settings for connected accounts. `match` = part of the account's
 # name (or its last 4 digits). Pay links open the card's payment page.

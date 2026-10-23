@@ -23,6 +23,7 @@ Rules:
 - You cannot move money. When someone wants to pay something, propose a plan; they pay it themselves from the links and tap Paid.
 - Settings changes (buffer, strategy) go through request_settings_change, which asks them to confirm with a button.
 - You are not a licensed financial advisor. Explain tradeoffs factually; don't recommend specific investments.
+- For spending questions use get_spending, get_subscriptions, find_transactions. Be direct and specific about habits worth changing (with the dollar amounts and what it would free up for debt), without lecturing.
 - Replies are read on a phone: short, plain text, no markdown tables or headers. Use dollar amounts and dates.
 Today is {today}."""
 
@@ -55,6 +56,35 @@ TOOLS = [
         "description": "Avalanche vs snowball: debt-free date, months, total interest and payoff order for the same monthly extra.",
         "input_schema": {"type": "object", "properties": {"monthly_extra": {"type": "number", "default": 500}},
                          "required": ["monthly_extra"]},
+    },
+    {
+        "name": "get_recurring",
+        "description": "Recurring bills paid from checking (detected from transactions), detected pay and next payday, monthly bills total.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_subscriptions",
+        "description": "Subscriptions (recurring charges on any account) with monthly/yearly cost, price increases, overlapping services, and which are flagged to cancel.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_spending",
+        "description": "Spending by category for the last N days compared with the person's normal, categories that are up, repeat small purchases, top merchants.",
+        "input_schema": {"type": "object", "properties": {"days": {"type": "integer", "default": 30}}},
+    },
+    {
+        "name": "find_transactions",
+        "description": "Search recent transactions by merchant, description or category text (empty text = all). Returns date, merchant, amount, category, account.",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"},
+                                                          "days": {"type": "integer", "default": 30}}},
+    },
+    {
+        "name": "mark_recurring",
+        "description": "Correct how a recurring charge or deposit is treated, matched by part of its name. choice: bill (reserve before payday), subscription, cancel (flag to cancel), ignore (not a real recurring charge), income (this is my pay), other_in (deposit that isn't pay).",
+        "input_schema": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "choice": {"type": "string", "enum": ["bill", "subscription", "cancel", "ignore", "income", "other_in"]}},
+            "required": ["name", "choice"]},
     },
     {
         "name": "propose_payment_plan",
@@ -104,6 +134,26 @@ class Assistant:
                                 args.get("lump_target"), args.get("strategy"))
         if name == "compare_strategies":
             return svc.compare(float(args.get("monthly_extra") or 0))
+        if name == "get_recurring":
+            return svc.recurring_overview()
+        if name == "get_subscriptions":
+            return svc.subscriptions()
+        if name == "get_spending":
+            sp = svc.spending(max(7, min(int(args.get("days") or 30), 120)))
+            for c in sp["categories"]:
+                c.pop("key", None)
+            return sp
+        if name == "find_transactions":
+            return {"transactions": svc.find_transactions(args.get("text") or "", int(args.get("days") or 30))}
+        if name == "mark_recurring":
+            want = args["name"].lower()
+            hits = [s for s in svc.store.streams(active_only=False)
+                    if want in f"{s.get('merchant') or ''} {s['name']}".lower()]
+            if len(hits) != 1:
+                return {"error": f"{len(hits)} recurring items match '{args['name']}'; be more specific.",
+                        "matches": [s.get("merchant") or s["name"] for s in hits][:10]}
+            s = svc.set_stream_kind(hits[0]["id"], args["choice"])
+            return {"updated": s.get("merchant") or s["name"], "now": args["choice"]}
         if name == "propose_payment_plan":
             overrides = args.get("extra_by_account") or None
             plan, pid = svc.build_plan(overrides=overrides)

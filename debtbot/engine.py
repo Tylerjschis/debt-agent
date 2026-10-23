@@ -39,9 +39,29 @@ class Debt:
 
 @dataclass
 class Bill:
+    """A recurring charge paid from checking.
+
+    Either `due_day` (day of the month, from config.yaml) or `next_date` plus
+    `frequency` (detected from your transactions) says when it hits.
+    """
     name: str
     amount: float
-    due_day: int
+    due_day: int | None = None
+    next_date: date | None = None
+    frequency: str = "monthly"  # weekly | biweekly | semi_monthly | monthly | annually
+
+
+STEP_DAYS = {"weekly": 7, "biweekly": 14, "semi_monthly": 15}
+
+
+def _advance(d: date, frequency: str) -> date:
+    f = (frequency or "monthly").lower()
+    if f in STEP_DAYS:
+        return d + timedelta(days=STEP_DAYS[f])
+    if f == "annually":
+        return _clamp_day(d.year + 1, d.month, d.day)
+    y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+    return _clamp_day(y, m, d.day)
 
 
 @dataclass
@@ -141,6 +161,16 @@ def bills_due_between(bills: list[Bill], start: date, end: date) -> list[tuple[s
     """Every bill occurrence with start <= due <= end."""
     out = []
     for b in bills:
+        if b.next_date:
+            d, guard = b.next_date, 0
+            while d < start and guard < 400:
+                d, guard = _advance(d, b.frequency), guard + 1
+            while d <= end:
+                out.append((b.name, round(b.amount, 2), d))
+                d = _advance(d, b.frequency)
+            continue
+        if not b.due_day:
+            continue
         d = next_on_day(b.due_day, start)
         while d <= end:
             out.append((b.name, round(b.amount, 2), d))
@@ -176,14 +206,14 @@ def target_order(debts: list[Debt], settings: Settings, today: date) -> list[Deb
     return sorted([d for d in debts if d.balance > CENT], key=key)
 
 
-def _reason(d: Debt, settings: Settings, today: date) -> str:
+def _reason(d: Debt, settings: Settings, today: date, first: bool = True) -> str:
     window_end = today + timedelta(days=settings.promo_window_days)
     if d.promo_end and today < d.promo_end <= window_end:
         kind = "deferred-interest promo" if d.deferred_interest else "0% promo"
         return f"{kind} ends {d.promo_end:%b} {d.promo_end.day}"
     if settings.strategy == "snowball":
-        return "smallest balance"
-    return f"{d.effective_apr(today):.2f}% APR, highest"
+        return "smallest balance" if first else "next smallest balance"
+    return f"{d.effective_apr(today):.2f}% APR" + (", highest" if first else "")
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +309,7 @@ def plan_paycheck(
         if remaining > CENT:
             plan.carried = remaining
     elif remaining >= settings.carry_threshold:
+        promo_first = False
         for d in target_order(debts, settings, today):
             if remaining <= CENT:
                 break
@@ -286,9 +317,12 @@ def plan_paycheck(
             if room <= CENT:
                 continue
             pay = round(min(room, remaining), 2)
-            ln = line_for(d, _reason(d, settings, today))
+            is_promo = bool(d.promo_end and today < d.promo_end <= today + timedelta(days=settings.promo_window_days))
+            why = _reason(d, settings, today, first=is_promo or not promo_first)
+            promo_first = promo_first or not is_promo
+            ln = line_for(d, why)
             if ln.minimum > CENT:
-                ln.reason = f"{ln.reason}; extra: {_reason(d, settings, today)}"
+                ln.reason = f"{ln.reason}; extra: {why}"
             ln.extra = round(ln.extra + pay, 2)
             owed[d.id] = round(owed[d.id] - pay, 2)
             remaining = round(remaining - pay, 2)

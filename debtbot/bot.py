@@ -18,7 +18,9 @@ from telegram.ext import (
 
 from .config import Config
 from .engine import match_debt
-from .messages import compare_text, day, money, plan_text, status_text
+from .insights import kind as stream_kind
+from .messages import (bills_text, compare_text, day, money, plan_text, recap_text, spending_text, status_text,
+                       stream_event_text, subs_text)
 from .service import Service
 from .store import Store
 
@@ -31,6 +33,9 @@ I watch your accounts, and when a paycheck lands I send a plan: bills and your b
 /plan – plan from what's in checking now
 /testpay 4200 – pretend a paycheck landed (testing)
 /compare 500 – avalanche vs snowball with $500/mo extra
+/bills – recurring bills and pay it detected
+/subs – subscriptions and what they cost
+/spending – where the money went (last 30 days)
 /strategy avalanche|snowball
 /buffer 1500 – change your safety buffer
 /sync – pull fresh bank data now
@@ -119,6 +124,49 @@ class Bot:
                 )
         for tx in await asyncio.to_thread(self.svc.new_paychecks):
             await self.payday(ctx, tx["amount_in"], tx["id"])
+        await self.send_stream_events(ctx, await asyncio.to_thread(self.svc.recurring_events))
+
+    async def send_stream_events(self, ctx, events: list[dict]):
+        new = [ev for ev in events if ev["type"] == "new"]
+        others = [ev for ev in events if ev["type"] != "new"]
+        if len(new) > 3:  # first look at your accounts: one summary, not a flood
+            ov = await asyncio.to_thread(self.svc.recurring_overview)
+            subs = await asyncio.to_thread(self.svc.subscriptions)
+            pay = f"Pay: {ov['income'][0]['name']}, next {day(ov['next_payday'])}.\n" if ov["income"] else ""
+            await ctx.bot.send_message(
+                self.cfg.owner_id,
+                f"🔎 I went through your transactions and found:\n"
+                f"• {len(ov['bills_from_checking'])} recurring bills from checking (~{money(ov['monthly_bills_total'])}/mo)\n"
+                f"• {len(subs['subscriptions'])} subscriptions ({money(subs['monthly_total'])}/mo, "
+                f"{money(subs['yearly_total'])}/yr)\n{pay}\n"
+                "Bills are set aside before card payments. Check them with /bills and /subs.")
+            new = []
+        for ev in new + others:
+            await ctx.bot.send_message(self.cfg.owner_id, stream_event_text(ev), parse_mode=ParseMode.HTML,
+                                       reply_markup=self._stream_keyboard(ev))
+
+    def _stream_keyboard(self, s: dict) -> InlineKeyboardMarkup | None:
+        k, pk = s.get("kind"), s["id"]
+        if s.get("type") == "still_charging":
+            return None
+        if k in ("subscription", "cancel") or s.get("type") == "price_up":
+            return InlineKeyboardMarkup([[
+                InlineKeyboardButton("✓ Keep", callback_data=f"ks:{pk}:subscription"),
+                InlineKeyboardButton("🚩 Flag to cancel", callback_data=f"ks:{pk}:cancel"),
+                InlineKeyboardButton("Not a sub", callback_data=f"ks:{pk}:bill"),
+            ]])
+        if k == "bill":
+            return InlineKeyboardMarkup([[
+                InlineKeyboardButton("✓ Right", callback_data=f"ks:{pk}:bill"),
+                InlineKeyboardButton("It's a subscription", callback_data=f"ks:{pk}:subscription"),
+                InlineKeyboardButton("Ignore", callback_data=f"ks:{pk}:ignore"),
+            ]])
+        if k == "income":
+            return InlineKeyboardMarkup([[
+                InlineKeyboardButton("✓ That's my pay", callback_data=f"ks:{pk}:income"),
+                InlineKeyboardButton("Not my pay", callback_data=f"ks:{pk}:other_in"),
+            ]])
+        return None
 
     async def payday(self, ctx, amount: float, tx_id: str | None):
         _, pid = await asyncio.to_thread(self.svc.build_plan, amount, tx_id)
@@ -201,6 +249,37 @@ class Bot:
             "Tap to connect a bank. This link works for 15 minutes and only for you." + note,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Connect a bank ↗", url=url)]]))
 
+    async def cmd_bills(self, update: Update, ctx):
+        await asyncio.to_thread(self.svc.refresh)
+        ov = await asyncio.to_thread(self.svc.recurring_overview)
+        rows = []
+        for s in self.store.streams("out"):
+            if s.get("account_type") == "depository" and (s.get("kind") or "") != "ignore":
+                if stream_kind(s) in ("bill", "subscription", "cancel"):
+                    rows.append([InlineKeyboardButton(f"✕ {s.get('merchant') or s['name']} isn't a bill",
+                                                      callback_data=f"ks:{s['id']}:ignore")])
+        await update.message.reply_text(bills_text(ov), parse_mode=ParseMode.HTML,
+                                        reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+
+    async def cmd_subs(self, update: Update, ctx):
+        await asyncio.to_thread(self.svc.refresh)
+        s = await asyncio.to_thread(self.svc.subscriptions)
+        rows = [[InlineKeyboardButton(f"{'🚩' if r['flagged'] else '✓'} {r['name']} {money(r['amount'])}",
+                                      callback_data=f"ksm:{r['id']}")] for r in s["subscriptions"]]
+        await update.message.reply_text(subs_text(s), parse_mode=ParseMode.HTML,
+                                        reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+
+    async def cmd_spending(self, update: Update, ctx):
+        days = int(_num(ctx.args[0]) or 30) if ctx.args else 30
+        await asyncio.to_thread(self.svc.refresh)
+        sp = await asyncio.to_thread(self.svc.spending, max(7, min(days, 120)))
+        await update.message.reply_text(spending_text(sp), parse_mode=ParseMode.HTML)
+
+    async def recap_job(self, ctx: ContextTypes.DEFAULT_TYPE):
+        r = await asyncio.to_thread(self.svc.recap)
+        if r["spending"]["total"] > 0:
+            await ctx.bot.send_message(self.cfg.owner_id, recap_text(r), parse_mode=ParseMode.HTML)
+
     async def cmd_sync(self, update: Update, ctx):
         broken = await asyncio.to_thread(self.svc.refresh)
         msg = f"Synced {len(self.store.accounts())} accounts."
@@ -239,6 +318,26 @@ class Bot:
                                                  disable_web_page_preview=True)
             amt = (pay["minimum"] or 0) + (pay["extra"] or 0)
             return await q.edit_message_text(f"✓ {pay['name']}: {money(amt)} marked paid.")
+        if kind == "ksm":  # a subscription tapped in /subs: show its choices
+            s = self.store.stream(int(arg))
+            if s:
+                ev = {**s, "type": "menu", "kind": stream_kind(s)}
+                await q.message.reply_text(stream_event_text({**ev, "type": "new"}).replace("New subscription", "Subscription"),
+                                           parse_mode=ParseMode.HTML, reply_markup=self._stream_keyboard(ev))
+            return
+        if kind == "ks":
+            pk, _, choice = arg.partition(":")
+            s = await asyncio.to_thread(self.svc.set_stream_kind, int(pk), choice)
+            if not s:
+                return
+            name = s.get("merchant") or s["name"]
+            msg = {"subscription": f"✓ Keeping {name}.",
+                   "cancel": f"🚩 {name} flagged to cancel. Cancel it on their site or app; "
+                             "I'll tell you if it charges again.",
+                   "bill": f"✓ {name} counted as a bill.", "ignore": f"✕ {name} ignored.",
+                   "income": f"✓ {name} is your pay. I'll plan around it.",
+                   "other_in": f"✓ {name} isn't treated as pay."}.get(choice, "Updated.")
+            return await q.edit_message_text(msg)
         if kind == "pl":
             _, pid = await asyncio.to_thread(self.svc.build_plan)
             return await self.send_plan(ctx, pid)
@@ -341,7 +440,8 @@ class Bot:
         for name, fn in [("start", self.cmd_help), ("help", self.cmd_help), ("status", self.cmd_status),
                          ("plan", self.cmd_plan), ("testpay", self.cmd_testpay), ("compare", self.cmd_compare),
                          ("strategy", self.cmd_strategy), ("buffer", self.cmd_buffer), ("sync", self.cmd_sync),
-                         ("link", self.cmd_link)]:
+                         ("link", self.cmd_link), ("bills", self.cmd_bills), ("subs", self.cmd_subs),
+                         ("spending", self.cmd_spending)]:
             app.add_handler(CommandHandler(name, fn, filters=me))
         app.add_handler(CallbackQueryHandler(self._guard_button))
         app.add_handler(MessageHandler(me & filters.TEXT & ~filters.COMMAND, self.on_text))
@@ -349,6 +449,7 @@ class Bot:
         jq = app.job_queue
         jq.run_repeating(self.poll_job, interval=cfg.check_minutes * 60, first=5)
         jq.run_daily(self.reminder_job, time=time(9, 0, tzinfo=ZoneInfo(cfg.timezone)))
+        jq.run_daily(self.recap_job, time=time(18, 0, tzinfo=ZoneInfo(cfg.timezone)), days=(0,))  # Sunday
         app.add_error_handler(self._on_error)
         return app
 
@@ -380,6 +481,9 @@ class Bot:
             BotCommand("plan", "Plan from what's in checking now"),
             BotCommand("testpay", "Pretend a paycheck landed"),
             BotCommand("compare", "Avalanche vs snowball"),
+            BotCommand("bills", "Recurring bills and pay"),
+            BotCommand("subs", "Subscriptions and costs"),
+            BotCommand("spending", "Where the money went"),
             BotCommand("strategy", "Set avalanche or snowball"),
             BotCommand("buffer", "Set your safety buffer"),
             BotCommand("sync", "Pull fresh bank data"),

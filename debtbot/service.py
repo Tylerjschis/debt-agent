@@ -10,9 +10,10 @@ import threading
 import uuid
 from datetime import date, timedelta
 
-from . import plaid_sync
-from .config import Config, apply_account_rules, is_paycheck, seed_demo, sync_manual_accounts
-from .engine import Plan, next_payday, plan_paycheck, simulate_payoff
+from . import insights, plaid_sync
+from .config import (Config, apply_account_rules, is_paycheck, seed_demo, seed_demo_activity,
+                     sync_manual_accounts)
+from .engine import Bill, Plan, _advance, next_payday, plan_paycheck, simulate_payoff
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class Service:
         broken: list[str] = []
         if self.cfg.mode == "demo":
             seed_demo(self.store, today)
+            seed_demo_activity(self.store, today)
         elif self._plaid:
             broken = plaid_sync.sync_all(self._plaid, self.store)
         sync_manual_accounts(self.store, self.cfg, today)
@@ -60,22 +62,47 @@ class Service:
     def checking_account(self) -> dict | None:
         return self.store.checking(self.cfg.checking_match)
 
+    def _auto_income(self) -> bool:
+        return (self.cfg.income.get("schedule") or "auto").lower() == "auto"
+
     def next_pay(self) -> date:
-        return next_payday(self.cfg.income, self.today())
+        """Next expected paycheck: from your detected pay pattern, or config.yaml."""
+        today = self.today()
+        if self._auto_income():
+            inc = insights.income_streams(self.store.streams("in"))
+            if inc:
+                d = insights.next_due(inc[0], today) or today
+                while d <= today:
+                    d = _advance(d, inc[0].get("frequency") or "biweekly")
+                return d
+            return today + timedelta(days=int(self.cfg.income.get("horizon_days") or 14))
+        return next_payday(self.cfg.income, today)
+
+    def bills(self) -> list[Bill]:
+        """Bills paid from checking: detected from your transactions, plus any in config.yaml."""
+        return list(self.cfg.bills) + insights.checking_bills(self.store.streams("out"), self.today())
 
     def build_plan(self, deposit: float = 0.0, tx_id: str | None = None,
                    overrides: dict[str, float] | None = None) -> tuple[Plan, int]:
         chk = self.checking_account()
         debts = self.store.debts()
+        bills = self.bills()
+        covered = self.store.covered_debt_ids(debts)
+        # A loan already paid by a detected bill (mortgage, car) isn't counted twice.
+        accts = {a["id"]: a for a in self.store.accounts()}
+        for d in debts:
+            if accts.get(d.id, {}).get("type") == "loan" and d.min_payment and any(
+                    abs(b.amount - d.min_payment) <= 0.1 * d.min_payment for b in bills if b.next_date):
+                covered.add(d.id)
         plan = plan_paycheck(
             checking=chk["balance"] if chk else 0.0,
             deposit=deposit,
             debts=debts,
-            bills=self.cfg.bills,
+            bills=bills,
             settings=self.cfg.settings(self.store),
             today=self.today(),
             next_pay=self.next_pay(),
-            already_covered=self.store.covered_debt_ids(debts),
+            already_covered=covered,
             overrides=overrides,
         )
         if chk is None:
@@ -90,11 +117,26 @@ class Service:
         """Unprocessed deposits into checking that match your pay rules."""
         chk = self.checking_account()
         found = []
+        inc = insights.income_streams(self.store.streams("in")) if self._auto_income() else []
         for tx in self.store.unprocessed_deposits(chk["id"] if chk else None):
-            if is_paycheck(tx["name"], tx["amount_in"], self.cfg.income_rules()):
+            if is_paycheck(tx["name"], tx["amount_in"], self.cfg.income_rules()) or self._matches_income(tx, inc):
                 found.append(tx)
             self.store.mark_processed(tx["id"])
         return found
+
+    @staticmethod
+    def _matches_income(tx: dict, inc: list[dict]) -> bool:
+        """A deposit looks like pay: same payer as a detected pay stream (or labeled
+        as income), and at least half the usual amount."""
+        if not inc:
+            return tx.get("category") == "INCOME" and tx["amount_in"] >= 500
+        text = f"{tx.get('merchant') or ''} {tx.get('name') or ''}".lower()
+        for s in inc:
+            key = (s.get("merchant") or s.get("name") or "").lower()[:14].strip()
+            same_payer = bool(key) and key in text
+            if (same_payer or tx.get("category") == "INCOME") and tx["amount_in"] >= 0.5 * (s.get("avg_amount") or 0):
+                return True
+        return False
 
     def fake_paycheck(self, amount: float) -> dict:
         """Testing: pretend a paycheck just landed."""
@@ -102,7 +144,8 @@ class Service:
         if chk is None:
             raise RuntimeError("No checking account yet.")
         tx_id = f"fake-{uuid.uuid4().hex[:10]}"
-        self.store.add_transaction(tx_id, chk["id"], self.today(), "TEST PAYCHECK", amount)
+        self.store.add_transaction(tx_id, chk["id"], self.today(), "TEST PAYCHECK", amount,
+                                   category="INCOME", detailed="INCOME_WAGES")
         self.store.update_account(chk["id"], balance=round(chk["balance"] + amount, 2))
         self.store.mark_processed(tx_id)
         self.store.audit("fake_paycheck", {"amount": amount})
@@ -181,7 +224,7 @@ class Service:
         end = today + timedelta(days=days)
         from .engine import bills_due_between
         return {
-            "bills": [{"name": n, "amount": a, "due": str(d)} for n, a, d in bills_due_between(self.cfg.bills, today, end)],
+            "bills": [{"name": n, "amount": a, "due": str(d)} for n, a, d in bills_due_between(self.bills(), today, end)],
             "debt_payments": [
                 {"name": d.name, "minimum": d.min_payment, "due": str(d.due_date)}
                 for d in self.store.debts() if d.due_date and today <= d.due_date <= end
@@ -216,3 +259,77 @@ class Service:
                 out.append({"kind": "promo", "name": d.name, "promo_end": str(d.promo_end),
                             "balance": d.balance, "deferred_interest": d.deferred_interest})
         return out
+
+    # -- recurring charges, subscriptions, spending ------------------------------------
+    def recurring_overview(self) -> dict:
+        today = self.today()
+        streams = self.store.streams()
+        bills = insights.checking_bills(streams, today)
+        inc = insights.income_streams(streams)
+        return {
+            "income": [{"name": s.get("merchant") or s["name"], "amount": s["avg_amount"],
+                        "frequency": s["frequency"], "next": str(insights.next_due(s, today) or "")} for s in inc],
+            "next_payday": str(self.next_pay()),
+            "bills_from_checking": [{"name": b.name, "amount": b.amount, "frequency": b.frequency,
+                                     "next": str(b.next_date)} for b in sorted(bills, key=lambda b: b.next_date)]
+                                   + [{"name": b.name, "amount": b.amount, "frequency": "monthly",
+                                       "next": f"day {b.due_day} (from config.yaml)"} for b in self.cfg.bills],
+            "monthly_bills_total": round(sum(insights.monthly(b.amount, b.frequency) for b in bills)
+                                         + sum(b.amount for b in self.cfg.bills), 2),
+        }
+
+    def subscriptions(self) -> dict:
+        return insights.subscriptions(self.store.streams("out"), self.today())
+
+    def spending(self, days: int = 30) -> dict:
+        today = self.today()
+        start = today - timedelta(days=days - 1)
+        history = self.store.transactions_between(start - timedelta(days=3 * days), today)
+        return insights.spending(history, start, today, history)
+
+    def find_transactions(self, text: str = "", days: int = 30, limit: int = 40) -> list[dict]:
+        today = self.today()
+        rows = self.store.transactions_between(today - timedelta(days=days), today)
+        text = text.lower().strip()
+        hits = [r for r in rows if not text or text in f"{r.get('merchant') or ''} {r['name']} {r.get('category') or ''}".lower()]
+        return [{"date": r["date"], "merchant": r.get("merchant") or r["name"], "amount": -r["amount_in"],
+                 "category": insights.pretty_category(r.get("category")), "account": r.get("account_name")}
+                for r in hits[-limit:]]
+
+    def set_stream_kind(self, pk: int, kind: str) -> dict | None:
+        self.store.set_stream(pk, kind=kind)
+        if kind == "cancel":
+            s = self.store.stream(pk)
+            self.store.kv_set(f"cancel_seen:{pk}", s.get("last_date") if s else None)
+        self.store.audit("stream_marked", {"stream": pk, "kind": kind})
+        return self.store.stream(pk)
+
+    def recap(self) -> dict:
+        """Last 7 days, for the Sunday message."""
+        today = self.today()
+        subs = self.subscriptions()["subscriptions"]
+        soon = [s for s in subs if s["next"] and today < date.fromisoformat(s["next"]) <= today + timedelta(days=7)]
+        return {"spending": self.spending(7), "renewing_this_week": soon,
+                "total_debt": round(sum(d.balance for d in self.store.debts()), 2)}
+
+    def recurring_events(self) -> list[dict]:
+        """New recurring charges and price increases, each reported once."""
+        events = []
+        for s in self.store.streams():
+            k = insights.kind(s)
+            if not s.get("notified"):
+                self.store.set_stream(s["id"], notified=1)
+                if k not in ("transfer", "other_in"):
+                    events.append({**s, "type": "new", "kind": k})
+            if s.get("kind") == "cancel":
+                seen = self.store.kv_get(f"cancel_seen:{s['id']}")
+                if s.get("last_date") and seen and s["last_date"] > seen:
+                    self.store.kv_set(f"cancel_seen:{s['id']}", s["last_date"])
+                    events.append({**s, "type": "still_charging", "kind": k})
+            last, avg = s.get("last_amount") or 0, s.get("avg_amount") or 0
+            # Utility bills swing month to month; price alerts are for subscriptions.
+            if (s["direction"] == "out" and k == "subscription" and last > avg * 1.05 and last - avg >= 1
+                    and s.get("price_alert_date") != s.get("last_date")):
+                self.store.set_stream(s["id"], price_alert_date=s.get("last_date"))
+                events.append({**s, "type": "price_up", "kind": k})
+        return events

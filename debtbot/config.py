@@ -159,3 +159,104 @@ def seed_demo(store: Store, today: date):
     for r in rows:
         store.upsert_account({**r, "source": "demo"})
     store.audit("demo_seeded")
+
+
+def seed_demo_activity(store: Store, today: date):
+    """Four months of made-up transactions and recurring charges for demo mode,
+    so bills, subscriptions and spending can be tried before Plaid is connected."""
+    import random
+
+    if store.streams(active_only=False):
+        return
+    rnd = random.Random(7)
+    PRIMARY = ("FOOD_AND_DRINK", "TRANSPORTATION", "GENERAL_MERCHANDISE", "HOME_IMPROVEMENT", "BANK_FEES",
+               "ENTERTAINMENT", "PERSONAL_CARE", "GENERAL_SERVICES", "RENT_AND_UTILITIES", "LOAN_PAYMENTS",
+               "INCOME", "TRANSFER_OUT")
+
+    def primary(det: str) -> str:
+        return next(p for p in PRIMARY if det.startswith(p))
+
+    def last_on_day(day: int) -> date:
+        d = next_on_day(day, today - timedelta(days=31))
+        while next_on_day(day, d + timedelta(days=1)) <= today:
+            d = next_on_day(day, d + timedelta(days=1))
+        return d
+
+    def nxt(d: date) -> date:
+        return next_on_day(d.day, d + timedelta(days=1))
+
+    # A Friday paycheck every two weeks
+    last_pay = today - timedelta(days=(today.weekday() - 4) % 7 or 7)
+    streams = [
+        # direction, account, name, detailed, amount (avg, last), frequency, last date
+        ("in", "demo-checking", "ACME CORP PAYROLL", "INCOME_WAGES", (4200, 4200), "biweekly", last_pay),
+        ("out", "demo-checking", "Mortgage", "LOAN_PAYMENTS_MORTGAGE_PAYMENT", (1850, 1850), "monthly", last_on_day(1)),
+        ("out", "demo-checking", "BGE Electric", "RENT_AND_UTILITIES_GAS_AND_ELECTRICITY", (176.4, 189.2), "monthly", last_on_day(18)),
+        ("out", "demo-checking", "Verizon", "RENT_AND_UTILITIES_TELEPHONE", (210, 210), "monthly", last_on_day(24)),
+        ("out", "demo-checking", "Progressive Insurance", "GENERAL_SERVICES_INSURANCE", (185, 185), "monthly", last_on_day(9)),
+        ("out", "demo-checking", "Chase Card Autopay", "LOAN_PAYMENTS_CREDIT_CARD_PAYMENT", (95, 95), "monthly", last_on_day(28)),
+        ("out", "demo-chase", "Netflix", "ENTERTAINMENT_TV_AND_MOVIES", (22.99, 22.99), "monthly", last_on_day(3)),
+        ("out", "demo-amex", "Hulu", "ENTERTAINMENT_TV_AND_MOVIES", (17.99, 17.99), "monthly", last_on_day(11)),
+        ("out", "demo-cap1", "Max", "ENTERTAINMENT_TV_AND_MOVIES", (16.99, 16.99), "monthly", last_on_day(14)),
+        ("out", "demo-chase", "Spotify", "ENTERTAINMENT_MUSIC_AND_AUDIO", (11.99, 11.99), "monthly", last_on_day(6)),
+        ("out", "demo-amex", "Audible", "ENTERTAINMENT_MUSIC_AND_AUDIO", (14.95, 14.95), "monthly", last_on_day(20)),
+        ("out", "demo-cap1", "Planet Fitness", "PERSONAL_CARE_GYMS_AND_FITNESS_CENTERS", (24.99, 24.99), "monthly", last_on_day(15)),
+        ("out", "demo-chase", "Adobe", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", (56.66, 59.99), "monthly", last_on_day(8)),
+        ("out", "demo-chase", "Apple iCloud", "GENERAL_SERVICES_OTHER_GENERAL_SERVICES", (2.99, 2.99), "monthly", last_on_day(2)),
+    ]
+    tx_n = 0
+
+    def tx(acct, d, name, det, amount_in):
+        nonlocal tx_n
+        tx_n += 1
+        store.add_transaction(f"demo-tx-{tx_n}", acct, d, name, round(amount_in, 2),
+                              merchant=name, category=primary(det), detailed=det)
+
+    start = today - timedelta(days=120)
+    for i, (direction, acct, name, det, (avg, last), freq, last_d) in enumerate(streams):
+        nd = last_d + timedelta(days=14) if freq == "biweekly" else nxt(last_d)
+        store.upsert_stream({
+            "stream_id": f"demo-stream-{i}", "item_id": "demo", "account_id": acct, "direction": direction,
+            "name": name, "merchant": name, "frequency": freq, "avg_amount": avg, "last_amount": last,
+            "last_date": str(last_d), "next_date": str(nd), "category": primary(det), "detailed": det,
+            "status": "MATURE", "active": 1,
+        })
+        d = last_d
+        while d >= start:
+            amt = last if d == last_d else avg
+            tx(acct, d, name, det, amt if direction == "in" else -amt)
+            d = d - timedelta(days=14) if freq == "biweekly" else next_on_day(d.day, d - timedelta(days=31))
+    # One yearly charge
+    prime = today - timedelta(days=200)
+    store.upsert_stream({
+        "stream_id": "demo-stream-prime", "item_id": "demo", "account_id": "demo-chase", "direction": "out",
+        "name": "Amazon Prime", "merchant": "Amazon Prime", "frequency": "annually", "avg_amount": 139,
+        "last_amount": 139, "last_date": str(prime), "next_date": str(prime + timedelta(days=365)),
+        "category": "GENERAL_MERCHANDISE", "detailed": "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES",
+        "status": "MATURE", "active": 1,
+    })
+
+    # Everyday spending; food delivery jumps in the last month
+    d = start
+    while d <= today:
+        recent = (today - d).days < 30
+        if rnd.random() < 0.2:
+            tx("demo-chase", d, rnd.choice(["Giant", "Weis Markets"]), "FOOD_AND_DRINK_GROCERIES", -rnd.uniform(70, 180))
+        if rnd.random() < 0.25:
+            tx("demo-cap1", d, "Sheetz", "TRANSPORTATION_GAS", -rnd.uniform(40, 70))
+        if rnd.random() < 0.55:
+            tx("demo-amex", d, rnd.choice(["Starbucks", "Dunkin"]), "FOOD_AND_DRINK_COFFEE", -rnd.uniform(4.5, 9))
+        if rnd.random() < (0.45 if recent else 0.14):
+            tx("demo-chase", d, "DoorDash", "FOOD_AND_DRINK_RESTAURANT", -rnd.uniform(24, 46))
+        if rnd.random() < 0.13:
+            tx("demo-amex", d, rnd.choice(["Olive Garden", "Firestone's", "Chipotle"]),
+               "FOOD_AND_DRINK_RESTAURANT", -rnd.uniform(18, 110))
+        if rnd.random() < 0.22:
+            tx("demo-chase", d, "Amazon", "GENERAL_MERCHANDISE_ONLINE_MARKETPLACES", -rnd.uniform(12, 85))
+        if rnd.random() < 0.04:
+            tx("demo-cap1", d, "Home Depot", "HOME_IMPROVEMENT_HARDWARE", -rnd.uniform(30, 240))
+        if rnd.random() < 0.03:
+            tx("demo-checking", d, "ATM Fee", "BANK_FEES_ATM_FEES", -3.5)
+        d += timedelta(days=1)
+    store.mark_all_processed()
+    store.audit("demo_activity_seeded", {"transactions": tx_n})

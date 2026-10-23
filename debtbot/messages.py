@@ -82,3 +82,92 @@ def compare_text(cmp: dict, extra: float) -> str:
     else:
         lines.append("They come out about the same.")
     return "\n".join(lines)
+
+
+FREQ = {"weekly": "/wk", "biweekly": "every 2 wks", "semi_monthly": "twice a month", "monthly": "/mo",
+        "annually": "/yr"}
+
+
+def bills_text(ov: dict) -> str:
+    out = ["<b>Recurring from checking</b> (set aside before any card gets extra)", ""]
+    for b in ov["bills_from_checking"]:
+        nxt = b["next"] if not b["next"][:4].isdigit() else day(b["next"])
+        out.append(f"• {e(b['name'])}: {money(b['amount'])} {FREQ.get(b['frequency'], '')}, next {nxt}")
+    if not ov["bills_from_checking"]:
+        out.append("None detected yet. They appear after a few weeks of transactions.")
+    out += ["", f"About {money(ov['monthly_bills_total'])}/month."]
+    if ov["income"]:
+        i = ov["income"][0]
+        out.append(f"💵 Pay: {e(i['name'])} about {money(i['amount'])} {FREQ.get(i['frequency'], '')}. "
+                   f"Next expected {day(ov['next_payday'])}.")
+    else:
+        out.append("💵 Pay not detected yet; planning assumes the next 2 weeks.")
+    out.append("\nWrong? Tap a charge in /subs, or tell me (\"Verizon isn't a bill\").")
+    return "\n".join(out)
+
+
+def subs_text(s: dict) -> str:
+    rows = s["subscriptions"]
+    if not rows:
+        return "No subscriptions detected yet."
+    out = [f"<b>Subscriptions: {money(s['monthly_total'])}/month · {money(s['yearly_total'])}/year</b>", ""]
+    for r in rows:
+        extra = f" ⬆️ up {money(r['price_up'])}" if r["price_up"] else ""
+        flag = " 🚩" if r["flagged"] else ""
+        unit = FREQ.get(r["frequency"], "")
+        per = f"{money(r['amount'])}{unit}" + (f" ({money(r['monthly'])}/mo)" if r["frequency"] != "monthly" else "")
+        out.append(f"• {e(r['name'])}: {per}{extra}{flag}")
+    for kind_, names in s["overlaps"].items():
+        out.append(f"\n💡 {len(names)} {e(kind_.lower())} services: {e(', '.join(names))}. Need all of them?")
+    if s["flagged_to_cancel"]:
+        out.append(f"\n🚩 To cancel: {e(', '.join(s['flagged_to_cancel']))}")
+    out.append("\nTap one below to keep it or flag it to cancel.")
+    return "\n".join(out)
+
+
+def spending_text(sp: dict, title: str | None = None) -> str:
+    out = [title or f"<b>Spending, last {sp['days']} days: {money(sp['total'])}</b>"]
+    if sp["normal_total"]:
+        diff = sp["total"] - sp["normal_total"]
+        word = "more" if diff > 0 else "less"
+        out.append(f"That's {money(abs(diff))} {word} than your usual {money(sp['normal_total'])}.")
+    out.append("")
+    for c in sp["categories"][:8]:
+        ch = (f" ({'+' if c['change_pct'] > 0 else ''}{c['change_pct']}%)"
+              if c["change_pct"] not in (None, 0) and (c["normal"] or 0) >= 25 else "")
+        out.append(f"• {e(c['category'])}: {money(c['spent'])}{ch}")
+    if sp["up_from_normal"]:
+        out.append("")
+        for c in sp["up_from_normal"]:
+            out.append(f"📈 {e(c['category'])} is up {c['change_pct']}%: {money(c['spent'])} vs usual {money(c['normal'])}")
+    if sp["repeat_small_purchases"]:
+        out.append("")
+        for h in sp["repeat_small_purchases"][:3]:
+            out.append(f"🔁 {e(h['merchant'])}: {h['count']} times, {money(h['total'])} total (~{money(h['average'])} each)")
+    if sp["biggest"]:
+        b = sp["biggest"]
+        out.append(f"\nBiggest: {e(b['merchant'])} {money(b['amount'])} on {day(b['date'])}")
+    return "\n".join(out)
+
+
+def recap_text(r: dict) -> str:
+    sp = r["spending"]
+    out = [spending_text(sp, f"🗓 <b>Your week: {money(sp['total'])} spent</b>")]
+    if r["renewing_this_week"]:
+        out.append("\nRenewing this week: " + e(", ".join(f"{s['name']} {money(s['amount'])}" for s in r["renewing_this_week"])))
+    out.append(f"\nTotal debt: {money(r['total_debt'])}")
+    return "\n".join(out)
+
+
+def stream_event_text(ev: dict) -> str:
+    name = e(ev.get("merchant") or ev["name"])
+    amt = money(ev.get("last_amount") or ev.get("avg_amount") or 0)
+    unit = FREQ.get(ev.get("frequency") or "", "")
+    where = f" on {e(ev['account_name'])}" if ev.get("account_name") else ""
+    if ev["type"] == "still_charging":
+        return f"🚩 <b>{name}</b> charged {amt} again{where}, but you flagged it to cancel. Did the cancellation go through?"
+    if ev["type"] == "price_up":
+        return (f"⬆️ <b>{name}</b> went up: now {amt}{unit}, was about {money(ev.get('avg_amount') or 0)}{where}.")
+    label = {"subscription": "New subscription", "bill": "New recurring bill", "income": "Recurring deposit"}.get(
+        ev["kind"], "New recurring charge")
+    return f"🔎 <b>{label}:</b> {name} {amt}{unit}{where}."

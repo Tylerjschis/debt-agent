@@ -40,7 +40,22 @@ CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, event TEXT, detail TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS streams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, stream_id TEXT UNIQUE, item_id TEXT,
+    account_id TEXT, direction TEXT, name TEXT, merchant TEXT, frequency TEXT,
+    avg_amount REAL, last_amount REAL, last_date TEXT, next_date TEXT,
+    category TEXT, detailed TEXT, status TEXT, active INTEGER, kind TEXT,
+    notified INTEGER DEFAULT 0, price_alert_date TEXT, updated_at TEXT
+);
 """
+
+# Columns added after the first release; added to existing databases on start.
+MIGRATIONS = [
+    ("transactions", "merchant", "TEXT"),
+    ("transactions", "category", "TEXT"),
+    ("transactions", "detailed", "TEXT"),
+    ("transactions", "pending", "INTEGER DEFAULT 0"),
+]
 
 
 def _d(s: str | None) -> date | None:
@@ -57,6 +72,11 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        for table, col, typ in MIGRATIONS:
+            cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self.db.commit()
         self._lock = threading.RLock()
         self.fernet = Fernet(key.encode()) if key else None
 
@@ -147,15 +167,62 @@ class Store:
         return dict(checking[0]) if checking else None
 
     # -- transactions --------------------------------------------------------------
-    def add_transaction(self, tx_id: str, account_id: str, on: date | str, name: str, amount_in: float):
-        self._x("INSERT OR IGNORE INTO transactions(id,account_id,date,name,amount_in,created_at) VALUES(?,?,?,?,?,?)",
-                (tx_id, account_id, str(on), name, amount_in, _now()))
+    def add_transaction(self, tx_id: str, account_id: str, on: date | str, name: str, amount_in: float,
+                        merchant: str | None = None, category: str | None = None,
+                        detailed: str | None = None, pending: bool = False):
+        self._x("INSERT INTO transactions(id,account_id,date,name,amount_in,created_at,"
+                "merchant,category,detailed,pending) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET date=excluded.date, name=excluded.name, "
+                "amount_in=excluded.amount_in, merchant=excluded.merchant, category=excluded.category, "
+                "detailed=excluded.detailed, pending=excluded.pending",
+                (tx_id, account_id, str(on), name, amount_in, _now(), merchant, category, detailed, int(pending)))
+
+    def transactions_between(self, start: date, end: date) -> list[dict]:
+        """Settled transactions in included accounts, oldest first."""
+        return [dict(r) for r in self._q(
+            "SELECT t.*, a.name AS account_name, a.type AS account_type FROM transactions t "
+            "LEFT JOIN accounts a ON a.id=t.account_id "
+            "WHERE t.date>=? AND t.date<=? AND COALESCE(t.pending,0)=0 AND COALESCE(a.excluded,0)=0 "
+            "ORDER BY t.date", (str(start), str(end)))]
+
+    # -- recurring streams (detected bills, subscriptions, income) ------------
+    def upsert_stream(self, s: dict) -> tuple[int, bool]:
+        """Insert or update by stream_id. Returns (row id, is_new)."""
+        s = {**s, "updated_at": _now()}
+        r = self._q("SELECT id FROM streams WHERE stream_id=?", (s["stream_id"],))
+        if r:
+            cols = ", ".join(f"{k}=?" for k in s if k != "stream_id")
+            self._x(f"UPDATE streams SET {cols} WHERE stream_id=?",
+                    (*[v for k, v in s.items() if k != "stream_id"], s["stream_id"]))
+            return r[0]["id"], False
+        cols = ", ".join(s)
+        cur = self._x(f"INSERT INTO streams({cols}) VALUES ({','.join('?' * len(s))})", tuple(s.values()))
+        return cur.lastrowid, True
+
+    def streams(self, direction: str | None = None, active_only: bool = True) -> list[dict]:
+        sql = ("SELECT s.*, a.name AS account_name, a.type AS account_type, COALESCE(a.excluded,0) AS excluded "
+               "FROM streams s LEFT JOIN accounts a ON a.id=s.account_id WHERE 1=1")
+        args: list = []
+        if direction:
+            sql += " AND s.direction=?"
+            args.append(direction)
+        if active_only:
+            sql += " AND s.active=1 AND COALESCE(s.status,'')!='TOMBSTONED'"
+        return [dict(r) for r in self._q(sql + " ORDER BY s.avg_amount DESC", tuple(args)) if not r["excluded"]]
+
+    def stream(self, pk: int) -> dict | None:
+        r = self._q("SELECT * FROM streams WHERE id=?", (pk,))
+        return dict(r[0]) if r else None
+
+    def set_stream(self, pk: int, **fields):
+        cols = ", ".join(f"{k}=?" for k in fields)
+        self._x(f"UPDATE streams SET {cols} WHERE id=?", (*fields.values(), pk))
 
     def remove_transaction(self, tx_id: str):
         self._x("DELETE FROM transactions WHERE id=? AND processed=0", (tx_id,))
 
     def unprocessed_deposits(self, account_id: str | None) -> list[dict]:
-        sql = "SELECT * FROM transactions WHERE processed=0 AND amount_in > 0"
+        sql = "SELECT * FROM transactions WHERE processed=0 AND amount_in > 0 AND COALESCE(pending,0)=0"
         args: tuple = ()
         if account_id:
             sql += " AND account_id=?"
