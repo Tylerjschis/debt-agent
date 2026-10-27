@@ -24,13 +24,15 @@ Rules:
 - Settings changes (buffer, strategy) go through request_settings_change, which asks them to confirm with a button.
 - You are not a licensed financial advisor. Explain tradeoffs factually; don't recommend specific investments.
 - For spending questions use get_spending, get_subscriptions, find_transactions. Be direct and specific about habits worth changing (with the dollar amounts and what it would free up for debt), without lecturing.
+- Only state what the tools return. If an account or bank the person mentions isn't in get_overview, say it isn't connected (or has a problem, from linked_banks) and suggest /link or /accounts. Never guess what an account is.
+- A 0% APR or $0 minimum on a loan usually means the bank didn't share those details, not that the loan is free; say so.
 - Replies are read on a phone: short, plain text, no markdown tables or headers. Use dollar amounts and dates.
 Today is {today}."""
 
 TOOLS = [
     {
         "name": "get_overview",
-        "description": "Current debts (balance, APR now and after any promo, minimum, due date, data source), checking balance, buffer, strategy, next payday, total debt.",
+        "description": "Current debts (balance, APR now and after any promo, minimum, due date, data source), the checking account used for plans and its balance, every other cash account (savings, other checking), every linked bank with any connection problem, buffer, strategy, next payday, total debt.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {

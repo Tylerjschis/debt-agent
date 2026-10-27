@@ -61,7 +61,10 @@ def create_link_token(api: plaid_api.PlaidApi, user_id: str = "owner", redirect_
     kwargs = dict(
         user=LinkTokenCreateRequestUser(client_user_id=user_id),
         client_name="Debt Agent",
-        products=[Products("transactions"), Products("liabilities")],
+        # Every bank needs Transactions. Card/loan details (Liabilities) are pulled when the
+        # bank offers them, so checking-only banks and credit unions can still connect.
+        products=[Products("transactions")],
+        required_if_supported_products=[Products("liabilities")],
         country_codes=[CountryCode("US")],
         language="en",
         transactions=LinkTokenTransactions(days_requested=365),  # a year of history for spending trends
@@ -82,21 +85,42 @@ def sync_all(api: plaid_api.PlaidApi, store: Store) -> list[str]:
     broken = []
     for inst in store.institutions():
         try:
-            _sync_item(api, store, inst)
-            store.set_institution(inst["item_id"], status="ok")
+            notes = _sync_item(api, store, inst)
+            store.set_institution(inst["item_id"], status="ok", last_error="; ".join(notes) or None)
         except plaid.ApiException as e:
             body = getattr(e, "body", "") or ""
             log.warning("Plaid sync failed for %s: %s", inst["name"], body[:300])
+            code = _err(e)
             if "ITEM_LOGIN_REQUIRED" in body:
-                store.set_institution(inst["item_id"], status="login_required")
+                store.set_institution(inst["item_id"], status="login_required", last_error=code)
                 broken.append(inst["name"])
             else:
-                store.set_institution(inst["item_id"], status="error")
+                store.set_institution(inst["item_id"], status="error", last_error=code)
     return broken
 
 
-def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict):
+def _err(e: Exception) -> str:
+    """Plaid's short error code and message, for /accounts."""
+    import json
+    try:
+        b = json.loads(getattr(e, "body", "") or "{}")
+        return f"{b.get('error_code', 'ERROR')}: {b.get('error_message', '')}"[:200]
+    except ValueError:
+        return str(e)[:200]
+
+
+def _balance(bal: dict, kind: str) -> float:
+    """Current balance; for bank accounts fall back to available when current is missing."""
+    cur, avail = bal.get("current"), bal.get("available")
+    if cur is None and kind == "depository":
+        cur = avail
+    return float(cur or 0)
+
+
+def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict) -> list[str]:
+    """Sync one bank. Returns notes about parts that didn't work (shown in /accounts)."""
     token = inst["access_token"]
+    notes: list[str] = []
 
     # 1. Accounts and balances
     accts = api.accounts_get(AccountsGetRequest(access_token=token)).to_dict()["accounts"]
@@ -106,7 +130,8 @@ def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict):
             "id": a["account_id"], "item_id": inst["item_id"], "name": a["name"],
             "official_name": a.get("official_name"), "mask": a.get("mask"),
             "type": str(a["type"]), "subtype": str(a.get("subtype") or ""),
-            "balance": float(bal.get("current") or 0), "source": "plaid", "updated_at": None,
+            "balance": _balance(bal, str(a["type"])),
+            "available": bal.get("available"), "source": "plaid", "updated_at": None,
         })
 
     # 2. Card and loan details (rates, minimums, due dates)
@@ -114,6 +139,8 @@ def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict):
         liab = api.liabilities_get(LiabilitiesGetRequest(access_token=token)).to_dict()["liabilities"]
     except plaid.ApiException as e:
         log.info("No liabilities for %s (%s)", inst["name"], (getattr(e, "body", "") or "")[:120])
+        if any(a["type"] in ("credit", "loan") for a in accts):
+            notes.append("card/loan details unavailable (" + _err(e).split(":")[0] + ")")
         liab = {}
     for c in liab.get("credit") or []:
         aprs = c.get("aprs") or []
@@ -140,6 +167,20 @@ def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict):
     # 3. New transactions since last sync
     cursor = inst.get("cursor")
     first_sync = cursor is None
+    try:
+        cursor = _sync_transactions(api, store, token, cursor)
+    except plaid.ApiException as e:
+        notes.append("transactions: " + _err(e))
+        return notes
+    store.set_institution(inst["item_id"], cursor=cursor)
+    _sync_recurring(api, store, inst)
+    if first_sync:
+        # Don't fire payday alerts for months of old history.
+        store.mark_all_processed()
+    return notes
+
+
+def _sync_transactions(api: plaid_api.PlaidApi, store: Store, token: str, cursor: str | None) -> str:
     while True:
         req = TransactionsSyncRequest(access_token=token, cursor=cursor) if cursor \
             else TransactionsSyncRequest(access_token=token)
@@ -155,12 +196,7 @@ def _sync_item(api: plaid_api.PlaidApi, store: Store, inst: dict):
             store.remove_transaction(t["transaction_id"])
         cursor = resp["next_cursor"]
         if not resp["has_more"]:
-            break
-    store.set_institution(inst["item_id"], cursor=cursor)
-    _sync_recurring(api, store, inst)
-    if first_sync:
-        # Don't fire payday alerts for months of old history.
-        store.mark_all_processed()
+            return cursor
 
 
 def _sync_recurring(api: plaid_api.PlaidApi, store: Store, inst: dict):

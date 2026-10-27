@@ -46,3 +46,14 @@ def test_settings_change_persists(tmp_path, monkeypatch):
     svc.update_settings(buffer=1500, strategy="snowball")
     s = svc.cfg.settings(svc.store)
     assert s.buffer == 1500 and s.strategy == "snowball"
+
+
+def test_removed_manual_account_disappears(tmp_path, monkeypatch):
+    svc = make(tmp_path, monkeypatch)
+    svc.cfg.manual_accounts = [{"name": "Car Loan", "type": "loan", "balance": 1000, "apr": 5,
+                                "min_payment": 100, "due_day": 5}]
+    svc.refresh()
+    assert any(d.name == "Car Loan" for d in svc.store.debts())
+    svc.cfg.manual_accounts = []
+    svc.refresh()
+    assert not any(d.name == "Car Loan" for d in svc.store.debts())

@@ -95,6 +95,10 @@ def apply_account_rules(store: Store, cfg: Config):
                 fields["deferred_interest"] = int(bool(rule["deferred_interest"]))
             if rule.get("apr") is not None:
                 fields["apr"] = float(rule["apr"])
+            if rule.get("min_payment") is not None:
+                fields["min_payment"] = float(rule["min_payment"])
+            if rule.get("due_day"):
+                fields["due_date"] = str(next_on_day(int(rule["due_day"]), date.today()))
             if "exclude" in rule:
                 fields["excluded"] = int(bool(rule["exclude"]))
             if fields:

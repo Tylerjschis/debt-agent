@@ -53,7 +53,13 @@ def plan_text(plan_row: dict, payments: list[dict], title: str | None = None) ->
 def status_text(snap: dict) -> str:
     out = [f"<b>Total debt: {money(snap['total_debt'])}</b>"]
     if snap["checking_balance"] is not None:
-        out.append(f"Checking: {money(snap['checking_balance'])} (buffer {money(snap['buffer'])})")
+        out.append(f"Checking ({e(snap['checking_account'])}): {money(snap['checking_balance'])} "
+                   f"(buffer {money(snap['buffer'])})")
+        others = [a for a in snap.get("cash_accounts", []) if a["name"] != snap["checking_account"]]
+        if others:
+            out.append("Other cash: " + e(", ".join(f"{a['name']} {money(a['balance'])}" for a in others)))
+    else:
+        out.append("No checking account found. Send /accounts to see what's linked.")
     out.append(f"Strategy: {snap['strategy']} · Next payday: {day(snap['next_payday'])}")
     out.append("")
     for d in snap["debts"]:
@@ -171,3 +177,33 @@ def stream_event_text(ev: dict) -> str:
     label = {"subscription": "New subscription", "bill": "New recurring bill", "income": "Recurring deposit"}.get(
         ev["kind"], "New recurring charge")
     return f"🔎 <b>{label}:</b> {name} {amt}{unit}{where}."
+
+
+def accounts_text(banks: list[dict], accounts: list[dict], checking_id: str | None) -> str:
+    """Everything the bot can see, grouped by bank, for checking the connections."""
+    if not banks and not accounts:
+        return "No banks linked yet. Send /link to connect one."
+    by_item: dict = {}
+    for a in accounts:
+        by_item.setdefault(a.get("item_id") or "manual", []).append(a)
+    out = [f"<b>{len(banks)} bank{'s' if len(banks) != 1 else ''} linked</b>"]
+    status_icon = {"ok": "✅", "login_required": "🔌", "error": "⚠️"}
+    for b in banks:
+        icon = status_icon.get(b["status"], "⏳")
+        out.append(f"\n{icon} <b>{e(b['name'])}</b>")
+        if b.get("last_error"):
+            out.append(f"   <i>{e(b['last_error'])}</i>")
+        rows = by_item.pop(b["item_id"], [])
+        if not rows:
+            out.append("   No accounts came through from this bank.")
+        for a in rows:
+            tag = " ← checking used for plans" if a["id"] == checking_id else ""
+            off = " (excluded)" if a.get("excluded") else ""
+            last4 = f" ••{a['mask']}" if a.get("mask") else ""
+            kind = a.get("subtype") or a.get("type") or ""
+            out.append(f"   • {e(a['name'])}{last4} ({e(kind)}): {money(a['balance'] or 0)}{off}{tag}")
+    for rows in by_item.values():
+        for a in rows:
+            out.append(f"\n• {e(a['name'])} (manual): {money(a['balance'] or 0)}")
+    out.append("\nMissing a bank? Send /link and connect it. Wrong checking account? Tell me which one.")
+    return "\n".join(out)

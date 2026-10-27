@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -55,6 +55,8 @@ MIGRATIONS = [
     ("transactions", "category", "TEXT"),
     ("transactions", "detailed", "TEXT"),
     ("transactions", "pending", "INTEGER DEFAULT 0"),
+    ("institutions", "last_error", "TEXT"),
+    ("accounts", "available", "REAL"),
 ]
 
 
@@ -121,6 +123,11 @@ class Store:
             out.append(d)
         return out
 
+    def institution_list(self) -> list[dict]:
+        """Linked banks without their tokens, for display."""
+        return [{k: r[k] for k in r.keys() if k != "token_enc"}
+                for r in self._q("SELECT * FROM institutions ORDER BY name")]
+
     def set_institution(self, item_id: str, **fields):
         fields["updated_at"] = _now()
         cols = ", ".join(f"{k}=?" for k in fields)
@@ -163,12 +170,30 @@ class Store:
             for r in rows
         ]
 
+    def cash_accounts(self) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM accounts WHERE type='depository' AND excluded=0 ORDER BY balance DESC")]
+
     def checking(self, match: str | None = None) -> dict | None:
-        rows = self._q("SELECT * FROM accounts WHERE type='depository' AND excluded=0 ORDER BY name")
+        """The checking account your pay lands in and bills come out of.
+
+        config.yaml `checking_account` (part of the name or last 4) wins. Otherwise the
+        checking account with the most money coming in over the last 90 days, then the
+        one with the highest balance."""
+        rows = self.cash_accounts()
         if match:
-            rows = [r for r in rows if match.lower() in (r["name"] or "").lower()] or rows
+            m = match.lower()
+            hit = [r for r in rows if m in f"{r['name'] or ''} {r.get('official_name') or ''} {r.get('mask') or ''}".lower()]
+            if hit:
+                return hit[0]
         checking = [r for r in rows if (r["subtype"] or "") == "checking"] or rows
-        return dict(checking[0]) if checking else None
+        if not checking:
+            return None
+        since = (date.today() - timedelta(days=90)).isoformat()
+        inflow = {r["account_id"]: r["total"] for r in self._q(
+            "SELECT account_id, SUM(amount_in) AS total FROM transactions WHERE amount_in>0 AND date>=? "
+            "GROUP BY account_id", (since,))}
+        return max(checking, key=lambda r: (inflow.get(r["id"], 0), r["balance"] or 0))
 
     # -- transactions --------------------------------------------------------------
     def add_transaction(self, tx_id: str, account_id: str, on: date | str, name: str, amount_in: float,

@@ -175,7 +175,13 @@ class Service:
         s = self.cfg.settings(self.store)
         return {
             "today": str(today),
+            "checking_account": chk["name"] if chk else None,
             "checking_balance": chk["balance"] if chk else None,
+            "cash_accounts": [{"name": a["name"], "type": a["subtype"], "mask": a.get("mask"),
+                               "balance": a["balance"], "available": a.get("available")}
+                              for a in self.store.cash_accounts()],
+            "linked_banks": [{"name": i["name"], "status": i["status"], "problem": i.get("last_error")}
+                             for i in self.store.institution_list()],
             "buffer": s.buffer,
             "strategy": s.strategy,
             "next_payday": str(self.next_pay()),

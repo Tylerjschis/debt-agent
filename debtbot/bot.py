@@ -19,7 +19,7 @@ from telegram.ext import (
 from .config import Config
 from .engine import match_debt
 from .insights import kind as stream_kind
-from .messages import (bills_text, compare_text, day, money, plan_text, recap_text, spending_text, status_text,
+from .messages import (accounts_text, bills_text, compare_text, day, money, plan_text, recap_text, spending_text, status_text,
                        stream_event_text, subs_text)
 from .service import Service
 from .store import Store
@@ -40,6 +40,7 @@ I watch your accounts, and when a paycheck lands I send a plan: bills and your b
 /buffer 1500 – change your safety buffer
 /sync – pull fresh bank data now
 /link – connect a bank from your phone
+/accounts – every bank and account I can see
 
 Or just ask: "what if I put $1,000 on Capital One?" """
 
@@ -249,6 +250,12 @@ class Bot:
             "Tap to connect a bank. This link works for 15 minutes and only for you." + note,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Connect a bank ↗", url=url)]]))
 
+    async def cmd_accounts(self, update: Update, ctx):
+        await asyncio.to_thread(self.svc.refresh)
+        chk = self.svc.checking_account()
+        text = accounts_text(self.store.institution_list(), self.store.accounts(), chk["id"] if chk else None)
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
     async def cmd_bills(self, update: Update, ctx):
         await asyncio.to_thread(self.svc.refresh)
         ov = await asyncio.to_thread(self.svc.recurring_overview)
@@ -440,7 +447,7 @@ class Bot:
         for name, fn in [("start", self.cmd_help), ("help", self.cmd_help), ("status", self.cmd_status),
                          ("plan", self.cmd_plan), ("testpay", self.cmd_testpay), ("compare", self.cmd_compare),
                          ("strategy", self.cmd_strategy), ("buffer", self.cmd_buffer), ("sync", self.cmd_sync),
-                         ("link", self.cmd_link), ("bills", self.cmd_bills), ("subs", self.cmd_subs),
+                         ("link", self.cmd_link), ("accounts", self.cmd_accounts), ("bills", self.cmd_bills), ("subs", self.cmd_subs),
                          ("spending", self.cmd_spending)]:
             app.add_handler(CommandHandler(name, fn, filters=me))
         app.add_handler(CallbackQueryHandler(self._guard_button))
@@ -488,6 +495,7 @@ class Bot:
             BotCommand("buffer", "Set your safety buffer"),
             BotCommand("sync", "Pull fresh bank data"),
             BotCommand("link", "Connect a bank"),
+            BotCommand("accounts", "Every bank and account I can see"),
             BotCommand("help", "What I can do"),
         ])
         await asyncio.to_thread(self.svc.refresh)
