@@ -12,7 +12,7 @@ settings:
   reminder_days: 3          # remind you this many days before a due date
   check_interval_minutes: 15
   timezone: America/New_York
-  checking_account: "Plaid Checking"   # which checking account your pay lands in (part of its name)
+  # checking_account: ""    # filled in once your real checking shows up in /status
 
 # How you get paid. "auto" learns it from your deposits (recommended).
 income:
@@ -30,8 +30,9 @@ bills: []
 # Per-account settings for connected accounts. `match` = part of the account's
 # name (or its last 4 digits). Pay links open the card's payment page.
 accounts:
-  - match: "Plaid Credit Card"          # Sandbox card; replace with your real ones
-    nickname: "Sandbox Card"
-    pay_url: "https://www.chase.com"
   - match: "Business"
-    exclude: true                       # keep
+    exclude: true           # keep business accounts out of the personal plan
+
+# Accounts Plaid can't see. Enter once; the agent estimates the balance each
+# month (balance + interest - payment). Update `balance` from a statement now and then.
+manual_accounts: []
