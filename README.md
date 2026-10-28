@@ -146,6 +146,26 @@ python -m debtbot.cli plan --deposit 4200
 python -m debtbot.cli compare --extra 600
 ```
 
+## Dashboard on your phone
+
+Send `/app` in Telegram. Tap **Open dashboard** (or go to your Render address
+`/app` and type the code). On iPhone, open it in Safari and tap Share, then
+Add to Home Screen, so it opens like an app.
+
+- **Home:** what's left to spend this month, a payday plan to approve, cash and
+  debt totals, and bills due in the next two weeks.
+- **Budget:** limits per category. The first time, it suggests amounts from your
+  last three months of spending; adjust and save.
+- **Spending:** by category against your usual, small purchases that add up,
+  subscriptions (flag to cancel), and a searchable transaction list.
+- **Debt:** payoff date, a chart of minimums only vs. paying extra, and the
+  payoff order.
+- **Chat:** the same AI as Telegram, with your budget too.
+
+Security: codes and links work once for 10 minutes; sessions last 30 days and
+only a hash is stored; `/logout_all` signs out every device; the page loads
+nothing from other sites.
+
 ## What it learns from your transactions
 
 Once your checking and cards are connected, Plaid spots everything that repeats:

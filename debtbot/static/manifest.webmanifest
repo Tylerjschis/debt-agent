@@ -1,0 +1,14 @@
+{
+  "name": "Debt Agent",
+  "short_name": "Debt Agent",
+  "start_url": "/app",
+  "scope": "/app",
+  "display": "standalone",
+  "background_color": "#EDF1F2",
+  "theme_color": "#1B2730",
+  "icons": [
+    {"src": "/app/icon.svg", "sizes": "any", "type": "image/svg+xml"},
+    {"src": "/app/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}

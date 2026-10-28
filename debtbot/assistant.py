@@ -81,6 +81,17 @@ TOOLS = [
                                                           "days": {"type": "integer", "default": 30}}},
     },
     {
+        "name": "get_budget",
+        "description": "This month's budget: limit, spent and left per category (category keys like FOOD_AND_DRINK), income, debt payments, total left and left per day. If no budget is set it includes a suggested budget from the last 3 months.",
+        "input_schema": {"type": "object", "properties": {"month": {"type": "string", "description": "YYYY-MM, default this month"}}},
+    },
+    {
+        "name": "set_budget",
+        "description": "Set monthly budget limits by category key (e.g. {\"FOOD_AND_DRINK\": 900}). 0 removes a category. Only call when the person asked to set or change their budget.",
+        "input_schema": {"type": "object", "properties": {"limits": {"type": "object", "additionalProperties": {"type": "number"}}},
+                         "required": ["limits"]},
+    },
+    {
         "name": "mark_recurring",
         "description": "Correct how a recurring charge or deposit is treated, matched by part of its name. choice: bill (reserve before payday), subscription, cancel (flag to cancel), ignore (not a real recurring charge), income (this is my pay), other_in (deposit that isn't pay).",
         "input_schema": {"type": "object", "properties": {
@@ -136,6 +147,12 @@ class Assistant:
                                 args.get("lump_target"), args.get("strategy"))
         if name == "compare_strategies":
             return svc.compare(float(args.get("monthly_extra") or 0))
+        if name == "get_budget":
+            return svc.budget_status(args.get("month"))
+        if name == "set_budget":
+            svc.set_budget(args.get("limits") or {})
+            st = svc.budget_status()
+            return {"saved": True, "budget_total": st["budget_total"], "left": st["left"]}
         if name == "get_recurring":
             return svc.recurring_overview()
         if name == "get_subscriptions":

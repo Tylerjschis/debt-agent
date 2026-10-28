@@ -41,6 +41,7 @@ I watch your accounts, and when a paycheck lands I send a plan: bills and your b
 /sync – pull fresh bank data now
 /link – connect a bank from your phone
 /accounts – every bank and account I can see
+/app – open your dashboard (budget, spending, debt, chat)
 
 Or just ask: "what if I put $1,000 on Capital One?" """
 
@@ -56,8 +57,10 @@ class Bot:
             self.ai = Assistant(self.svc, cfg.anthropic_key, cfg.model)
         self.pending_settings: dict[int, dict] = {}
         self._next_settings_id = 1
+        from .dashboard import Dashboard
         from .web import LinkServer
-        self.web = LinkServer(self.svc, cfg.port, cfg.plaid_redirect_uri)
+        self.dashboard = Dashboard(self.svc, self.ai)
+        self.web = LinkServer(self.svc, cfg.port, cfg.plaid_redirect_uri, dashboard=self.dashboard)
 
     # -- sending ---------------------------------------------------------------
     def _plan_keyboard(self, plan_id: int, payments: list[dict], status: str) -> InlineKeyboardMarkup | None:
@@ -249,6 +252,22 @@ class Bot:
         await update.message.reply_text(
             "Tap to connect a bank. This link works for 15 minutes and only for you." + note,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Connect a bank ↗", url=url)]]))
+
+    async def cmd_app(self, update: Update, ctx):
+        code, link = self.dashboard.new_login()
+        url = f"{self.cfg.public_url}/app/login?t={link}"
+        await update.message.reply_text(
+            "📊 <b>Your dashboard</b>\n\n"
+            f"Tap the button to open it, or go to {self.cfg.public_url}/app and enter this code:\n\n"
+            f"<code>{code}</code>\n\n"
+            "The button and code work once, for 10 minutes. You'll stay signed in for 30 days.\n"
+            "On iPhone: open it in Safari, tap Share → Add to Home Screen.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open dashboard ↗", url=url)]]))
+
+    async def cmd_logout_all(self, update: Update, ctx):
+        n = await asyncio.to_thread(self.store.delete_all_sessions)
+        await update.message.reply_text(f"Signed out of the dashboard everywhere ({n} session{'s' if n != 1 else ''}).")
 
     async def cmd_accounts(self, update: Update, ctx):
         await asyncio.to_thread(self.svc.refresh)
@@ -447,7 +466,8 @@ class Bot:
         for name, fn in [("start", self.cmd_help), ("help", self.cmd_help), ("status", self.cmd_status),
                          ("plan", self.cmd_plan), ("testpay", self.cmd_testpay), ("compare", self.cmd_compare),
                          ("strategy", self.cmd_strategy), ("buffer", self.cmd_buffer), ("sync", self.cmd_sync),
-                         ("link", self.cmd_link), ("accounts", self.cmd_accounts), ("bills", self.cmd_bills), ("subs", self.cmd_subs),
+                         ("link", self.cmd_link), ("accounts", self.cmd_accounts),
+                         ("app", self.cmd_app), ("logout_all", self.cmd_logout_all), ("bills", self.cmd_bills), ("subs", self.cmd_subs),
                          ("spending", self.cmd_spending)]:
             app.add_handler(CommandHandler(name, fn, filters=me))
         app.add_handler(CallbackQueryHandler(self._guard_button))
@@ -496,6 +516,7 @@ class Bot:
             BotCommand("sync", "Pull fresh bank data"),
             BotCommand("link", "Connect a bank"),
             BotCommand("accounts", "Every bank and account I can see"),
+            BotCommand("app", "Open your dashboard"),
             BotCommand("help", "What I can do"),
         ])
         await asyncio.to_thread(self.svc.refresh)

@@ -348,6 +348,7 @@ class PayoffResult:
     total_interest: float
     payoff_month: dict[str, int]
     capped: bool = False  # True if it never pays off within the limit
+    balances: list[float] = field(default_factory=list)  # total owed at the start and after each month
 
 
 def _add_months(d: date, n: int) -> date:
@@ -394,6 +395,7 @@ def simulate_payoff(
                 break
 
     month = 0
+    series = [round(sum(d.balance for d in sim), 2)]
     while any(d.balance > CENT for d in sim) and month < max_months:
         month += 1
         on = _add_months(today, month)
@@ -417,6 +419,7 @@ def simulate_payoff(
         for d in sim:
             if d.balance <= CENT and d.name not in payoff:
                 payoff[d.name] = month
+        series.append(round(sum(max(d.balance, 0) for d in sim), 2))
 
     capped = any(d.balance > CENT for d in sim)
     return PayoffResult(
@@ -426,4 +429,5 @@ def simulate_payoff(
         total_interest=round(total_interest, 2),
         payoff_month=payoff,
         capped=capped,
+        balances=series,
     )

@@ -339,3 +339,54 @@ class Service:
                 self.store.set_stream(s["id"], price_alert_date=s.get("last_date"))
                 events.append({**s, "type": "price_up", "kind": k})
         return events
+
+    # -- budget -----------------------------------------------------------------------
+    def budget_limits(self) -> dict[str, float]:
+        return {k: float(v) for k, v in (self.store.kv_get("budget", {}) or {}).items()}
+
+    def budget_status(self, month: str | None = None) -> dict:
+        from . import budget
+        today = self.today()
+        start, _ = budget.month_bounds(month, today)
+        txs = self.store.transactions_between(start, start + timedelta(days=31))
+        st = budget.status(txs, self.budget_limits(), today, month)
+        if not st["has_budget"]:
+            st["suggested"] = self.budget_suggestion()
+        return st
+
+    def budget_suggestion(self) -> dict:
+        from . import budget
+        today = self.today()
+        txs = self.store.transactions_between(today.replace(day=1) - timedelta(days=100), today)
+        s = budget.suggest(txs, today)
+        return {"limits": s, "total": round(sum(s.values()), 2),
+                "names": {k: insights.pretty_category(k) for k in s}}
+
+    def set_budget(self, limits: dict[str, float | None], replace: bool = False) -> dict[str, float]:
+        """Set limits by category key. A value of None or 0 removes that category."""
+        current = {} if replace else self.budget_limits()
+        for k, v in limits.items():
+            key = str(k).upper().replace(" & ", "_AND_").replace(" ", "_")
+            if v in (None, 0, "") or float(v) <= 0:
+                current.pop(key, None)
+            else:
+                current[key] = round(float(v), 2)
+        self.store.kv_set("budget", current)
+        self.store.audit("budget_set", current)
+        return current
+
+    def payoff_projection(self, monthly_extra: float = 0.0) -> dict:
+        """Minimums only vs your plan with extra, for the Debt chart."""
+        debts = self.store.debts()
+        s = self.cfg.settings(self.store)
+        base = simulate_payoff(debts, monthly_extra=0, strategy=s.strategy, today=self.today(),
+                               promo_window_days=s.promo_window_days)
+        plan = simulate_payoff(debts, monthly_extra=monthly_extra, strategy=s.strategy, today=self.today(),
+                               promo_window_days=s.promo_window_days)
+
+        def pack(r):
+            return {"debt_free": str(r.debt_free) if r.debt_free else None, "months": r.months,
+                    "total_interest": r.total_interest, "balances": r.balances, "capped": r.capped,
+                    "payoff_order": sorted(r.payoff_month, key=r.payoff_month.get), "payoff_month": r.payoff_month}
+        return {"extra": monthly_extra, "strategy": s.strategy, "minimums_only": pack(base), "with_extra": pack(plan),
+                "monthly_minimums": round(sum(d.min_payment for d in debts), 2)}

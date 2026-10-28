@@ -69,8 +69,9 @@ if (location.pathname === '/oauth' && sessionStorage.getItem('dbl')) openLink(se
 
 
 class LinkServer:
-    def __init__(self, svc: Service, port: int, redirect_uri: str | None = None):
+    def __init__(self, svc: Service, port: int, redirect_uri: str | None = None, dashboard=None):
         self.svc = svc
+        self.dashboard = dashboard  # the phone app (/app); see dashboard.py
         self.port = port
         self.redirect_uri = redirect_uri
         self._tokens: dict[str, float] = {}
@@ -117,6 +118,13 @@ class LinkServer:
                 path = urlparse(self.path).path
                 if path == "/health":
                     return self._send(200, b"ok", "text/plain")
+                if path == "/" and outer.dashboard:
+                    self.send_response(302)
+                    self.send_header("Location", "/app")
+                    self.end_headers()
+                    return
+                if outer.dashboard and outer.dashboard.handle(self, "GET"):
+                    return
                 # /oauth is Plaid returning from a bank's own login page; the page
                 # carries its token in session storage, and every API call is checked.
                 if (path == "/link" and outer.valid(self._token())) or path == "/oauth":
@@ -127,6 +135,8 @@ class LinkServer:
 
             def do_POST(self):
                 path = urlparse(self.path).path
+                if outer.dashboard and outer.dashboard.handle(self, "POST"):
+                    return
                 if not outer.valid(self._token()):
                     return self._json({"error": "expired"}, 404)
                 api = outer.svc.plaid

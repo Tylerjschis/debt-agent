@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, event TEXT, detail TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS sessions (
+    id_hash TEXT PRIMARY KEY, created_at TEXT, expires_at REAL, last_seen TEXT, agent TEXT
+);
 CREATE TABLE IF NOT EXISTS streams (
     id INTEGER PRIMARY KEY AUTOINCREMENT, stream_id TEXT UNIQUE, item_id TEXT,
     account_id TEXT, direction TEXT, name TEXT, merchant TEXT, frequency TEXT,
@@ -122,6 +125,27 @@ class Store:
             d["access_token"] = self.fernet.decrypt(d.pop("token_enc").encode()).decode()
             out.append(d)
         return out
+
+    # -- dashboard sessions (only a hash of each session id is stored) ----------------
+    def add_session(self, id_hash: str, expires_at: float, agent: str):
+        self._x("INSERT INTO sessions(id_hash,created_at,expires_at,last_seen,agent) VALUES(?,?,?,?,?)",
+                (id_hash, _now(), expires_at, _now(), agent[:120]))
+        self.audit("dashboard_login", {"agent": agent[:120]})
+
+    def session_expires(self, id_hash: str) -> float | None:
+        r = self._q("SELECT expires_at FROM sessions WHERE id_hash=?", (id_hash,))
+        return r[0]["expires_at"] if r else None
+
+    def touch_session(self, id_hash: str):
+        self._x("UPDATE sessions SET last_seen=? WHERE id_hash=?", (_now(), id_hash))
+
+    def delete_session(self, id_hash: str):
+        self._x("DELETE FROM sessions WHERE id_hash=?", (id_hash,))
+
+    def delete_all_sessions(self) -> int:
+        n = self._x("DELETE FROM sessions").rowcount
+        self.audit("dashboard_logout_all", {"sessions": n})
+        return n
 
     def institution_list(self) -> list[dict]:
         """Linked banks without their tokens, for display."""
